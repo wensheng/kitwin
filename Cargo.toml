@@ -1,0 +1,19 @@
+[package]
+name = "kitwin"
+version = "0.1.0"
+edition = "2021"
+description = "A terminal window-manager proxy (JWM) using the Kitty graphics protocol"
+license = "Apache-2.0"
+repository = "https://github.com/wensheng/kitwin"
+readme = "README.md"
+keywords = ["cli", "utility", "desktop", "terminal"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+crossterm = "0.29"
+base64 = "0.22"
+ctrlc = "3.5"
+cpal = "0.17"
+ringbuf = "0.5"
+flate2 = "1"
