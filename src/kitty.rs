@@ -122,6 +122,7 @@ pub fn write_rgba_frame_native_to<W: Write>(
     )
 }
 
+#[allow(dead_code)]
 pub fn write_rgba_frame_native_with_id_to<W: Write>(
     writer: &mut W,
     pixels: &[u8],
@@ -136,6 +137,32 @@ pub fn write_rgba_frame_native_with_id_to<W: Write>(
         width_px,
         height_px,
         None,
+        prevent_cursor_move,
+        image_id,
+    )
+}
+
+/// Like [`write_rgba_frame_native_with_id_to`] but scales the image into a
+/// `cols`x`rows` cell box (Kitty's `c`/`r` keys), used by the streaming
+/// renderer to fit the captured desktop into the terminal. Does not delete any
+/// prior image; the renderer manages image-id lifetimes itself.
+#[allow(clippy::too_many_arguments)]
+pub fn write_rgba_frame_scaled_with_id_to<W: Write>(
+    writer: &mut W,
+    pixels: &[u8],
+    width_px: u32,
+    height_px: u32,
+    cols: u32,
+    rows: u32,
+    image_id: u32,
+    prevent_cursor_move: bool,
+) -> io::Result<()> {
+    write_rgba_frame_impl(
+        writer,
+        pixels,
+        width_px,
+        height_px,
+        Some((cols, rows)),
         prevent_cursor_move,
         image_id,
     )

@@ -4,6 +4,7 @@ mod config;
 mod ffmpeg;
 mod input;
 mod kitty;
+mod layout;
 mod renderer;
 mod wm;
 
@@ -39,8 +40,17 @@ fn main() {
 
     let config = Config::parse();
 
+    // Size the virtual display to the terminal's actual pixel dimensions so the
+    // desktop fills the window at native 1:1. On HiDPI/Retina (e.g. a Mac on a
+    // 4K display) Kitty reports physical device pixels — often ~1.5x the logical
+    // window size — so a fixed 1920x1200 would only cover part of the window.
+    // Explicit --width/--height still win.
+    let (detected_w, detected_h) = detect_display_size().unwrap_or((1920, 1200));
+    let width = config.width.unwrap_or(detected_w);
+    let height = config.height.unwrap_or(detected_h);
+
     // Start Xvfb
-    let mut session = match WmSession::new(config.display, config.width, config.height) {
+    let mut session = match WmSession::new(config.display, width, height) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("kitwin: {}", e);
@@ -134,8 +144,8 @@ fn main() {
     // Capture thread
     let cap_running = running.clone();
     let cap_fps = config.fps;
-    let cap_w = config.width;
-    let cap_h = config.height;
+    let cap_w = width;
+    let cap_h = height;
     let capture_handle = thread::spawn(move || {
         capture::run_capture(display, cap_w, cap_h, cap_fps, capture_tx, recycle_rx, cap_running);
     });
@@ -233,4 +243,32 @@ fn main() {
     );
     let _ = stdout.flush();
     let _ = disable_raw_mode();
+}
+
+/// Detect the terminal's drawable size in pixels for the virtual display.
+///
+/// Kitty reports the window's size in *physical device pixels* via
+/// `TIOCGWINSZ` (`crossterm::terminal::window_size`). On HiDPI/Retina screens
+/// that is larger than the logical window size (e.g. ~1.5x on a Mac driving a
+/// scaled 4K display), which is exactly what we want: matching it makes each
+/// virtual-desktop pixel map to one device pixel, so the desktop fills the
+/// window and stays crisp.
+///
+/// The bottom row is reserved for the status bar, so we subtract one cell of
+/// height. Dimensions are rounded down to even numbers (friendlier to apps and
+/// scalers). Returns `None` if the terminal does not report pixel sizes.
+fn detect_display_size() -> Option<(u32, u32)> {
+    let ws = crossterm::terminal::window_size().ok()?;
+    if ws.width == 0 || ws.height == 0 || ws.rows == 0 {
+        return None;
+    }
+    let cell_h = ws.height as f64 / ws.rows as f64;
+    let usable_h = (ws.height as f64 - cell_h).max(1.0);
+
+    let w = (ws.width as u32) & !1;
+    let h = (usable_h as u32) & !1;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some((w, h))
 }

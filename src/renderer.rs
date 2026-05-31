@@ -42,6 +42,20 @@ pub fn run_renderer(
 
                 let (cols, rows) = terminal::size().unwrap_or((80, 24));
 
+                // Center the captured desktop in the terminal, scaling it down
+                // to fit when it is larger than the visible cell grid. The
+                // bottom row is reserved for the status bar / prompt.
+                let (cell_w, cell_h) = match terminal::window_size() {
+                    Ok(w) if w.columns > 0 && w.rows > 0 && w.width > 0 && w.height > 0 => (
+                        w.width as f64 / w.columns as f64,
+                        w.height as f64 / w.rows as f64,
+                    ),
+                    _ => (8.0, 16.0),
+                };
+                let render_rows = rows.saturating_sub(1).max(1);
+                let placement =
+                    crate::layout::placement(width, height, cols, render_rows, cell_w, cell_h);
+
                 // While an input prompt is up, the input thread owns the bottom
                 // row. Keep streaming the image so video doesn't freeze, but skip
                 // the status bar so we don't clobber the prompt.
@@ -61,9 +75,16 @@ pub fn run_renderer(
                 next_image_id = next_stream_image_id(next_image_id);
                 let old_image_id = current_image_id;
 
-                let _ = execute!(out, MoveTo(0, 0));
-                if kitty::write_rgba_frame_native_with_id_to(
-                    out, &rgba, width, height, image_id, true,
+                let _ = execute!(out, MoveTo(placement.col_offset, placement.row_offset));
+                if kitty::write_rgba_frame_scaled_with_id_to(
+                    out,
+                    &rgba,
+                    width,
+                    height,
+                    placement.cols as u32,
+                    placement.rows as u32,
+                    image_id,
+                    true,
                 )
                 .is_ok()
                 {

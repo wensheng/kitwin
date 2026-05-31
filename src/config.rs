@@ -8,13 +8,15 @@ use std::path::PathBuf;
     about = "A terminal window-manager (JWM) proxy using the Kitty graphics protocol"
 )]
 pub struct Config {
-    /// Virtual display width in pixels
-    #[arg(long, default_value_t = 1920)]
-    pub width: u32,
+    /// Virtual display width in pixels (defaults to the terminal's reported
+    /// pixel width, so the desktop fills the window at native 1:1)
+    #[arg(long)]
+    pub width: Option<u32>,
 
-    /// Virtual display height in pixels
-    #[arg(long, default_value_t = 1200)]
-    pub height: u32,
+    /// Virtual display height in pixels (defaults to the terminal's reported
+    /// pixel height minus the status bar row)
+    #[arg(long)]
+    pub height: Option<u32>,
 
     /// Capture frame rate
     #[arg(long, default_value_t = 30)]

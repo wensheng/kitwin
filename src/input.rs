@@ -416,30 +416,32 @@ fn mouse_button_number(button: MouseButton) -> u8 {
 }
 
 fn click_position(wm: &WmSession, column: u16, row: u16) -> Option<(u32, u32)> {
-    let window = terminal::window_size().ok();
-    let rows = window
-        .as_ref()
-        .map(|size| size.rows)
-        .or_else(|| terminal::size().ok().map(|(_, rows)| rows))?;
-    let render_rows = rows.checked_sub(1)?;
-
-    if render_rows == 0 || row >= render_rows {
-        return None;
-    }
-
     if wm.width == 0 || wm.height == 0 {
         return None;
     }
 
-    let (cell_width_px, cell_height_px) = terminal_cell_size_px(window.as_ref());
-    let x = ((column as f64 + 0.5) * cell_width_px).floor() as u32;
-    let y = ((row as f64 + 0.5) * cell_height_px).floor() as u32;
-
-    if x >= wm.width || y >= wm.height {
+    let window = terminal::window_size().ok();
+    let (cols, rows) = match window.as_ref() {
+        Some(size) if size.columns > 0 && size.rows > 0 => (size.columns, size.rows),
+        _ => terminal::size().ok()?,
+    };
+    let render_rows = rows.checked_sub(1)?; // bottom row is the status bar
+    if render_rows == 0 || row >= render_rows {
         return None;
     }
 
-    Some((x, y))
+    // Map the click through the same centred, scale-to-fit placement the
+    // renderer uses, so clicks land on the pixel under the cursor.
+    let (cell_width_px, cell_height_px) = terminal_cell_size_px(window.as_ref());
+    let placement = crate::layout::placement(
+        wm.width,
+        wm.height,
+        cols,
+        render_rows,
+        cell_width_px,
+        cell_height_px,
+    );
+    crate::layout::cell_to_source(placement, column, row, wm.width, wm.height)
 }
 
 fn terminal_cell_size_px(window: Option<&terminal::WindowSize>) -> (f64, f64) {
