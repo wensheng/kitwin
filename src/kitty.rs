@@ -9,12 +9,18 @@ use std::time::Duration;
 pub fn write_all_robust<W: Write>(mut writer: W, mut buf: &[u8]) -> io::Result<()> {
     while !buf.is_empty() {
         match writer.write(buf) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "failed to write whole buffer")),
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                ))
+            }
             Ok(n) => buf = &buf[n..],
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(1));
             }
-            Err(ref e) if e.raw_os_error() == Some(35) => { // EAGAIN on mac
+            Err(ref e) if e.raw_os_error() == Some(35) => {
+                // EAGAIN on mac
                 thread::sleep(Duration::from_millis(1));
             }
             Err(e) => return Err(e),
@@ -31,7 +37,8 @@ pub fn flush_robust<W: Write>(mut writer: W) -> io::Result<()> {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(1));
             }
-            Err(ref e) if e.raw_os_error() == Some(35) => { // EAGAIN on mac
+            Err(ref e) if e.raw_os_error() == Some(35) => {
+                // EAGAIN on mac
                 thread::sleep(Duration::from_millis(1));
             }
             Err(e) => return Err(e),
@@ -43,7 +50,11 @@ pub fn flush_robust<W: Write>(mut writer: W) -> io::Result<()> {
 pub fn move_up_robust(rows: u16) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     let mut buf = Vec::new();
-    crossterm::queue!(buf, crossterm::cursor::MoveUp(rows), crossterm::cursor::MoveToColumn(0))?;
+    crossterm::queue!(
+        buf,
+        crossterm::cursor::MoveUp(rows),
+        crossterm::cursor::MoveToColumn(0)
+    )?;
     write_all_robust(&mut stdout, &buf)?;
     flush_robust(&mut stdout)?;
     Ok(())
@@ -79,6 +90,7 @@ pub fn write_rgba_frame_to<W: Write>(
     rows: u32,
     prevent_cursor_move: bool,
 ) -> io::Result<()> {
+    delete_image_data_to(writer, FULL_FRAME_IMAGE_ID)?;
     write_rgba_frame_impl(
         writer,
         pixels,
@@ -86,6 +98,7 @@ pub fn write_rgba_frame_to<W: Write>(
         height_px,
         Some((cols, rows)),
         prevent_cursor_move,
+        FULL_FRAME_IMAGE_ID,
     )
 }
 
@@ -97,15 +110,44 @@ pub fn write_rgba_frame_native_to<W: Write>(
     height_px: u32,
     prevent_cursor_move: bool,
 ) -> io::Result<()> {
-    write_rgba_frame_impl(writer, pixels, width_px, height_px, None, prevent_cursor_move)
+    delete_image_data_to(writer, FULL_FRAME_IMAGE_ID)?;
+    write_rgba_frame_impl(
+        writer,
+        pixels,
+        width_px,
+        height_px,
+        None,
+        prevent_cursor_move,
+        FULL_FRAME_IMAGE_ID,
+    )
 }
 
-/// Stable image id for the single-image full-frame transmit path (P6). Repeated
-/// frames reuse this id (with placement `p=1`), so each replaces the previous in
-/// place rather than accumulating a fresh image terminal-side. Chosen well above
-/// the tile path's id range (`1..=number-of-tiles`, see `write_tile_to`) so the
-/// two transmit paths can never collide on an id.
+pub fn write_rgba_frame_native_with_id_to<W: Write>(
+    writer: &mut W,
+    pixels: &[u8],
+    width_px: u32,
+    height_px: u32,
+    image_id: u32,
+    prevent_cursor_move: bool,
+) -> io::Result<()> {
+    write_rgba_frame_impl(
+        writer,
+        pixels,
+        width_px,
+        height_px,
+        None,
+        prevent_cursor_move,
+        image_id,
+    )
+}
+
+/// Reserved id for the legacy single-image full-frame transmit helpers.
 const FULL_FRAME_IMAGE_ID: u32 = 0xFFFF;
+
+/// First id for the streaming renderer's full-frame images. The renderer uses
+/// monotonically increasing ids so it can place a new frame before deleting the
+/// previous frame, avoiding visible delete-before-redraw flashes.
+pub const STREAM_IMAGE_ID_START: u32 = FULL_FRAME_IMAGE_ID + 1;
 
 fn write_rgba_frame_impl<W: Write>(
     writer: &mut W,
@@ -114,45 +156,44 @@ fn write_rgba_frame_impl<W: Write>(
     height_px: u32,
     cells: Option<(u32, u32)>,
     prevent_cursor_move: bool,
+    image_id: u32,
 ) -> io::Result<()> {
     let c_policy = if prevent_cursor_move { ",C=1" } else { "" };
     let control = if let Some((cols, rows)) = cells {
         format!(
             "a=T,f=32,o=z,i={},p=1,s={},v={},c={},r={}{},q=2",
-            FULL_FRAME_IMAGE_ID, width_px, height_px, cols, rows, c_policy
+            image_id, width_px, height_px, cols, rows, c_policy
         )
     } else {
         format!(
             "a=T,f=32,o=z,i={},p=1,s={},v={}{},q=2",
-            FULL_FRAME_IMAGE_ID, width_px, height_px, c_policy
+            image_id, width_px, height_px, c_policy
         )
     };
     transmit_payload(writer, &control, pixels)
 }
 
-/// P2: transmit a single dirty tile as its own image and place it at the
-/// current cursor cell. `tile_w`/`tile_h` are the tile's pixel dimensions;
-/// `cells_w`/`cells_h` are the whole-cell box the protocol scales it into so
-/// tiles abut on the cell grid. `image_id` is stable per tile position (`p=1`),
-/// so a repeated update replaces the previous tile in place instead of leaking
-/// images terminal-side. The caller must position the cursor first.
-pub fn write_tile_to<W: Write>(
-    writer: &mut W,
-    pixels: &[u8],
-    tile_w: u32,
-    tile_h: u32,
-    cells_w: u32,
-    cells_h: u32,
-    image_id: u32,
-) -> io::Result<()> {
-    // C=1: don't advance the cursor after placement. The caller positions the
-    // cursor per tile, so without this a tile near the bottom row would push
-    // the cursor past the screen and scroll the whole display.
-    let control = format!(
-        "a=T,f=32,o=z,i={},p=1,s={},v={},c={},r={},C=1,q=2",
-        image_id, tile_w, tile_h, cells_w, cells_h
-    );
-    transmit_payload(writer, &control, pixels)
+/// Delete all currently visible graphics placements, freeing image data where
+/// the terminal can. Used before full redraws and during shutdown so stale
+/// terminal-side placements cannot survive a grid/geometry change.
+pub fn delete_visible_images_to<W: Write>(writer: &mut W) -> io::Result<()> {
+    write_graphics_command(writer, "a=d,d=A,q=2")
+}
+
+/// Delete the stored image and all of its placements for an image id. The
+/// streaming renderer uses this after the replacement frame has already been
+/// placed, so deletion does not create visible blank squares.
+pub fn delete_image_data_to<W: Write>(writer: &mut W, image_id: u32) -> io::Result<()> {
+    if image_id == 0 {
+        return Ok(());
+    }
+    write_graphics_command(writer, &format!("a=d,d=I,i={},q=2", image_id))
+}
+
+fn write_graphics_command<W: Write>(writer: &mut W, control: &str) -> io::Result<()> {
+    let mut packet = Vec::new();
+    write!(packet, "\x1b_G{}\x1b\\", control)?;
+    write_all_robust(&mut *writer, &packet)
 }
 
 /// Compress (P3 `o=z` zlib), base64-encode, and write `pixels` as a sequence of

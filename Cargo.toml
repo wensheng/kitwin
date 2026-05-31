@@ -1,6 +1,6 @@
 [package]
 name = "kitwin"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A terminal window-manager proxy (JWM) using the Kitty graphics protocol"
 license = "Apache-2.0"

@@ -1,7 +1,6 @@
 mod audio;
 mod capture;
 mod config;
-mod diff;
 mod ffmpeg;
 mod input;
 mod kitty;
