@@ -8,15 +8,46 @@ pub struct WmSession {
     pub display: u8,
     pub width: u32,
     pub height: u32,
-    xvfb: Child,
+    /// `None` when attached to a session started by another process (we don't
+    /// own the X server, so we must not kill it).
+    xvfb: Option<Child>,
     jwm: Option<Child>,
     spawned: Vec<Child>,
     pulse_sink: Option<String>,
     pulse_server: Option<String>,
+    /// When false (after detach), `Drop` leaves all child processes running so
+    /// the X session survives this kitwin exit. Always true outside session mode.
+    kill_on_drop: bool,
+    /// When true (session mode), children are spawned detached (`setsid`) so
+    /// they survive terminal signals and a detached parent.
+    detach_children: bool,
 }
 
 impl WmSession {
+    /// Default session: spawn a fresh Xvfb owned by (and killed with) this
+    /// process. Behavior is unchanged from before session support existed.
     pub fn new(display: u8, width: u32, height: u32) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::spawn_new(display, width, height, false)
+    }
+
+    /// Persistent session: like [`WmSession::new`] but the Xvfb is detached
+    /// (`setsid`) so it can outlive this process, and future children are
+    /// detached too. The session is still killed on `Drop` unless
+    /// [`WmSession::set_detach`] is called first.
+    pub fn new_session(
+        display: u8,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::spawn_new(display, width, height, true)
+    }
+
+    fn spawn_new(
+        display: u8,
+        width: u32,
+        height: u32,
+        detach_children: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let display = find_free_display(display);
         let mut xvfb_cmd = Command::new("Xvfb");
         xvfb_cmd.args([
@@ -27,6 +58,9 @@ impl WmSession {
             "-ac",
         ]);
         configure_child_output(&mut xvfb_cmd);
+        if detach_children {
+            crate::session::detach(&mut xvfb_cmd);
+        }
 
         let mut xvfb = xvfb_cmd
             .spawn()
@@ -42,12 +76,55 @@ impl WmSession {
             display,
             width,
             height,
-            xvfb,
+            xvfb: Some(xvfb),
             jwm: None,
             spawned: Vec::new(),
             pulse_sink: None,
             pulse_server: None,
+            kill_on_drop: true,
+            detach_children,
         })
+    }
+
+    /// Attach to an already-running persistent session: capture/inject on its
+    /// existing display without spawning Xvfb or jwm. We do not own the X server
+    /// or window manager, so `Drop` never kills them; only apps launched during
+    /// this attach (tracked in `spawned`) are ours.
+    pub fn attach(
+        display: u8,
+        width: u32,
+        height: u32,
+        pulse_sink: Option<String>,
+        pulse_server: Option<String>,
+    ) -> Self {
+        Self {
+            display,
+            width,
+            height,
+            xvfb: None,
+            jwm: None,
+            spawned: Vec::new(),
+            pulse_sink,
+            pulse_server,
+            kill_on_drop: true,
+            detach_children: true,
+        }
+    }
+
+    /// Detach: stop owning the child processes so `Drop` leaves the whole X
+    /// session running for a later reattach.
+    pub fn set_detach(&mut self) {
+        self.kill_on_drop = false;
+    }
+
+    /// PID of the owned Xvfb, if this process started it (for the state file).
+    pub fn xvfb_pid(&self) -> Option<u32> {
+        self.xvfb.as_ref().map(|c| c.id())
+    }
+
+    /// PID of the owned jwm, if this process started it (for the state file).
+    pub fn jwm_pid(&self) -> Option<u32> {
+        self.jwm.as_ref().map(|c| c.id())
     }
 
     pub fn start_jwm(
@@ -78,6 +155,9 @@ impl WmSession {
             cmd.arg("-rc").arg(path);
         }
         configure_child_output(&mut cmd);
+        if self.detach_children {
+            crate::session::detach(&mut cmd);
+        }
 
         let mut child = cmd
             .spawn()
@@ -103,6 +183,9 @@ impl WmSession {
             command.env("PULSE_SERVER", server);
         }
         configure_child_output(&mut command);
+        if self.detach_children {
+            crate::session::detach(&mut command);
+        }
 
         let child = command
             .spawn()
@@ -192,13 +275,19 @@ impl WmSession {
 
 impl Drop for WmSession {
     fn drop(&mut self) {
+        // After a detach, leave every child running so the X session persists.
+        if !self.kill_on_drop {
+            return;
+        }
         for mut child in self.spawned.drain(..) {
             let _ = child.kill();
         }
         if let Some(mut jwm) = self.jwm.take() {
             let _ = jwm.kill();
         }
-        let _ = self.xvfb.kill();
+        if let Some(mut xvfb) = self.xvfb.take() {
+            let _ = xvfb.kill();
+        }
     }
 }
 

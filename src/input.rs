@@ -17,6 +17,8 @@ pub enum ControlCmd {
     ToggleMute,
     VolumeBy(i32),
     Quit,
+    /// Leave the persistent X session running and exit (session mode only).
+    Detach,
     #[allow(dead_code)]
     Resize(u16, u16),
 }
@@ -33,10 +35,15 @@ pub fn run_input(
     status_msg: Arc<Mutex<String>>,
     stdout: Arc<Mutex<io::Stdout>>,
     prompt_active: Arc<AtomicBool>,
+    session_mode: bool,
 ) {
     {
         let mut s = status_msg.lock().unwrap();
-        *s = STATUS_HELP.to_string();
+        *s = if session_mode {
+            format!("{} | C-b d=detach", STATUS_HELP)
+        } else {
+            STATUS_HELP.to_string()
+        };
     }
 
     // F2: all keys are forwarded to the focused inner window. The local commands
@@ -61,6 +68,7 @@ pub fn run_input(
                     leader_pending = false;
                     handle_leader_command(
                         key, &wm, &control_tx, &running, &status_msg, &stdout, &prompt_active,
+                        session_mode,
                     );
                     if !running.load(Ordering::SeqCst) {
                         break;
@@ -72,7 +80,9 @@ pub fn run_input(
                 }
             }
 
-            // Mouse click / scroll forwarding (right-click opens JWM root menu)
+            // Mouse click / scroll forwarding (right-click opens JWM root menu).
+            // Motion/drag is deliberately not forwarded: doing so spawned an
+            // xdotool per event and made interaction unusable.
             Event::Mouse(m) => match m.kind {
                 MouseEventKind::Down(button) => {
                     let button = mouse_button_number(button);
@@ -124,6 +134,7 @@ fn is_leader(key: &KeyEvent) -> bool {
 
 /// Run the local command bound to `key` after the leader was pressed. Anything
 /// unrecognized is ignored (the leader is simply cancelled).
+#[allow(clippy::too_many_arguments)]
 fn handle_leader_command(
     key: KeyEvent,
     wm: &Arc<Mutex<WmSession>>,
@@ -132,6 +143,7 @@ fn handle_leader_command(
     status_msg: &Arc<Mutex<String>>,
     stdout: &Arc<Mutex<io::Stdout>>,
     prompt_active: &Arc<AtomicBool>,
+    session_mode: bool,
 ) {
     // Leader pressed twice → send a literal leader chord to the app.
     if is_leader(&key) {
@@ -143,6 +155,12 @@ fn handle_leader_command(
         KeyCode::Char('q') => {
             running.store(false, Ordering::SeqCst);
             let _ = control_tx.try_send(ControlCmd::Quit);
+        }
+        // Detach: exit but leave the persistent X session running. Only bound
+        // in session mode so it never shadows a key for non-session users.
+        KeyCode::Char('d') if session_mode => {
+            running.store(false, Ordering::SeqCst);
+            let _ = control_tx.try_send(ControlCmd::Detach);
         }
         KeyCode::Char('r') => {
             if let Some(cmd) = prompt_run(status_msg, stdout, prompt_active) {

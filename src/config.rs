@@ -41,4 +41,19 @@ pub struct Config {
     /// Path to a JWM rc file (passed to `jwm -rc`)
     #[arg(long)]
     pub jwm_config: Option<PathBuf>,
+
+    /// Create or attach to a named persistent session ("tmux for X"). The X
+    /// session (Xvfb/jwm/apps) survives detach (Ctrl+B d) and quitting via a
+    /// signal; re-run with the same name to reattach. Audio is disabled in
+    /// session mode.
+    #[arg(long)]
+    pub session: Option<String>,
+
+    /// List persistent sessions and whether each is still alive, then exit.
+    #[arg(long)]
+    pub list_sessions: bool,
+
+    /// Terminate a named persistent session (kills its Xvfb/jwm/apps) and exit.
+    #[arg(long)]
+    pub kill_session: Option<String>,
 }

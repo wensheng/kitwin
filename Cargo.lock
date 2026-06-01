@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "kitwin"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64",
  "clap",
@@ -492,6 +492,7 @@ dependencies = [
  "crossterm",
  "ctrlc",
  "flate2",
+ "libc",
  "ringbuf",
 ]
 

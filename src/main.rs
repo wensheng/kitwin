@@ -6,6 +6,7 @@ mod input;
 mod kitty;
 mod layout;
 mod renderer;
+mod session;
 mod wm;
 
 use capture::CaptureMsg;
@@ -29,7 +30,30 @@ use std::thread;
 use wm::WmSession;
 
 fn main() {
-    // Require Kitty terminal
+    let config = Config::parse();
+
+    // Session management commands work in any terminal and render no graphics,
+    // so handle them before requiring Kitty.
+    if config.list_sessions {
+        for (name, alive) in session::list() {
+            println!("{}\t{}", name, if alive { "alive" } else { "dead" });
+        }
+        return;
+    }
+    if let Some(name) = config.kill_session.as_deref() {
+        if !session::valid_name(name) {
+            eprintln!("kitwin: invalid session name '{}'", name);
+            std::process::exit(1);
+        }
+        if session::kill_by_name(name) {
+            println!("kitwin: terminated session '{}'", name);
+        } else {
+            println!("kitwin: no such session '{}'", name);
+        }
+        return;
+    }
+
+    // Require Kitty terminal for the interactive UI.
     if std::env::var("KITTY_WINDOW_ID").is_err() {
         let term = std::env::var("TERM").unwrap_or_default();
         if term != "xterm-kitty" {
@@ -38,30 +62,63 @@ fn main() {
         }
     }
 
-    let config = Config::parse();
-
-    // Size the virtual display to the terminal's actual pixel dimensions so the
-    // desktop fills the window at native 1:1. On HiDPI/Retina (e.g. a Mac on a
-    // 4K display) Kitty reports physical device pixels — often ~1.5x the logical
-    // window size — so a fixed 1920x1200 would only cover part of the window.
-    // Explicit --width/--height still win.
-    let (detected_w, detected_h) = detect_display_size().unwrap_or((1920, 1200));
-    let width = config.width.unwrap_or(detected_w);
-    let height = config.height.unwrap_or(detected_h);
-
-    // Start Xvfb
-    let mut session = match WmSession::new(config.display, width, height) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("kitwin: {}", e);
+    let session_name = config.session.clone();
+    let session_mode = session_name.is_some();
+    if let Some(name) = session_name.as_deref() {
+        if !session::valid_name(name) {
+            eprintln!("kitwin: invalid session name '{}'", name);
             std::process::exit(1);
+        }
+    }
+    // Audio isolation/playback can't survive detach in this version, so session
+    // mode runs without it — this leaves the audio path entirely untouched.
+    let no_audio = config.no_audio || session_mode;
+
+    // For --session, decide whether to create a new X session or attach to a
+    // live one. (Default mode never consults this.)
+    let role = session_name.as_deref().map(session::resolve);
+    let is_attach = matches!(&role, Some(session::Role::Attach(_)));
+    let is_create = matches!(&role, Some(session::Role::Create));
+
+    // Build the WmSession. Attach reuses the running display + geometry; create
+    // and default both spawn a fresh Xvfb sized to the terminal.
+    //
+    // Sizing rationale (create/default): match the terminal's actual pixel
+    // dimensions so the desktop fills the window at native 1:1. On HiDPI/Retina
+    // Kitty reports physical device pixels (~1.5x the logical size), so a fixed
+    // 1920x1200 would only cover part of the window. Explicit --width/--height
+    // still win.
+    let mut wm = match role {
+        Some(session::Role::Attach(state)) => WmSession::attach(
+            state.display,
+            state.width,
+            state.height,
+            state.pulse_sink,
+            state.pulse_server,
+        ),
+        _ => {
+            let (detected_w, detected_h) = detect_display_size().unwrap_or((1920, 1200));
+            let width = config.width.unwrap_or(detected_w);
+            let height = config.height.unwrap_or(detected_h);
+            let result = if session_mode {
+                WmSession::new_session(config.display, width, height)
+            } else {
+                WmSession::new(config.display, width, height)
+            };
+            match result {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("kitwin: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
     };
 
     let running = Arc::new(AtomicBool::new(true));
     let status_msg: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
-    let (audio_runtime, startup_audio_status) = if config.no_audio {
+    let (audio_runtime, startup_audio_status) = if no_audio {
         (None, None)
     } else {
         match audio::AudioRuntime::start(
@@ -76,7 +133,7 @@ fn main() {
             Err(err) => (None, Some(format!("audio direct fallback: {}", err))),
         }
     };
-    let audio_control_unavailable_status = if config.no_audio {
+    let audio_control_unavailable_status = if no_audio {
         String::from("audio disabled")
     } else {
         startup_audio_status
@@ -84,27 +141,53 @@ fn main() {
             .unwrap_or_else(|| String::from("audio unavailable"))
     };
 
-    if let Err(e) = session.start_jwm(
-        audio_runtime
-            .as_ref()
-            .map(|runtime| runtime.pulse_audio_env()),
-        config.jwm_config.as_deref(),
-    ) {
-        running.store(false, Ordering::SeqCst);
-        drop(audio_runtime);
-        eprintln!("kitwin: {}", e);
-        std::process::exit(1);
+    // jwm is already running when attaching; only start it when we own the X
+    // server (default or session-create).
+    if !is_attach {
+        if let Err(e) = wm.start_jwm(
+            audio_runtime
+                .as_ref()
+                .map(|runtime| runtime.pulse_audio_env()),
+            config.jwm_config.as_deref(),
+        ) {
+            running.store(false, Ordering::SeqCst);
+            drop(audio_runtime);
+            drop(wm); // kill the Xvfb we just spawned
+            eprintln!("kitwin: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    // Record session metadata once the X server + jwm are up so a later run can
+    // reattach to this display.
+    if is_create {
+        if let Some(name) = session_name.as_deref() {
+            let state = session::State {
+                display: wm.display,
+                width: wm.width,
+                height: wm.height,
+                xvfb_pid: wm.xvfb_pid().unwrap_or(0),
+                jwm_pid: wm.jwm_pid(),
+                pulse_sink: None,
+                pulse_server: None,
+            };
+            if let Err(e) = session::write_state(name, &state) {
+                eprintln!("kitwin: could not write session state: {}", e);
+            }
+        }
     }
 
     if let Some(cmd) = config.exec.as_deref() {
-        if let Err(e) = session.exec_on_display(cmd) {
+        if let Err(e) = wm.exec_on_display(cmd) {
             let mut s = status_msg.lock().unwrap();
             *s = format!("Exec error: {}", e);
         }
     }
 
-    let display = session.display;
-    let wm_session = Arc::new(Mutex::new(session));
+    let display = wm.display;
+    let width = wm.width;
+    let height = wm.height;
+    let wm_session = Arc::new(Mutex::new(wm));
 
     // Ctrl+C handler
     {
@@ -183,12 +266,19 @@ fn main() {
             inp_status,
             inp_stdout,
             inp_prompt_active,
+            session_mode,
         );
     });
     if let Some(status) = startup_audio_status {
         let mut s = status_msg.lock().unwrap();
         *s = status;
     }
+
+    // In session mode the X session persists by default — only an explicit quit
+    // (Ctrl+B q) or --kill-session tears it down — so an accidental Ctrl+C or a
+    // closed terminal leaves the session alive to reattach. Always false outside
+    // session mode, so default teardown is unchanged.
+    let mut keep_session = session_mode;
 
     // Main thread: handle control commands
     loop {
@@ -218,7 +308,13 @@ fn main() {
                     .unwrap_or_else(|| audio_control_unavailable_status.clone());
             }
             Ok(ControlCmd::Resize(_, _)) => {}
+            Ok(ControlCmd::Detach) => {
+                keep_session = session_mode;
+                running.store(false, Ordering::SeqCst);
+                break;
+            }
             Ok(ControlCmd::Quit) => {
+                keep_session = false;
                 running.store(false, Ordering::SeqCst);
                 break;
             }
@@ -233,6 +329,17 @@ fn main() {
     let _ = capture_handle.join();
     drop(audio_runtime);
 
+    // Session lifecycle. Detach: stop owning the children so Drop leaves the X
+    // session running. Kill: terminate the recorded processes and drop the
+    // state file (Drop also kills any children this process owns).
+    if session_mode {
+        if keep_session {
+            wm_session.lock().unwrap().set_detach();
+        } else if let Some(name) = session_name.as_deref() {
+            session::kill_by_name(name);
+        }
+    }
+
     // Restore terminal
     let _ = execute!(
         stdout,
@@ -243,6 +350,20 @@ fn main() {
     );
     let _ = stdout.flush();
     let _ = disable_raw_mode();
+
+    // Tell the user what happened to the session (after the screen is restored).
+    if session_mode {
+        if let Some(name) = session_name.as_deref() {
+            if keep_session {
+                println!(
+                    "kitwin: detached from session '{}'. Reattach with: kitwin --session {}",
+                    name, name
+                );
+            } else {
+                println!("kitwin: terminated session '{}'", name);
+            }
+        }
+    }
 }
 
 /// Detect the terminal's drawable size in pixels for the virtual display.
