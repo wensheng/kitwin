@@ -4,6 +4,8 @@ A full Linux desktop, rendered inside your terminal, with persistent session (li
 
 [![demo]](https://github.com/user-attachments/assets/03f1abcc-2223-4160-959c-3df6e7109ba9)
 
+[longer version (3min)](https://youtu.be/_43YNWlC-oU?si=wTgievSth4RsISxp) on Youtube.
+
 ## Installation
 
     cargo install kitwin
