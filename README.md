@@ -1,10 +1,8 @@
 # kitwin
 
-A full Linux desktop, rendered inside your terminal.
+A full Linux desktop, rendered inside your terminal, with persistent session (like TMUX for desktop).
 
-`kitwin` boots the [JWM window manager](https://joewing.net/projects/jwm/) inside a hidden X server, captures the screen with FFmpeg, and streams it to a [Kitty-protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) terminal as native-resolution graphics. Right-click for the JWM root menu. Launch xterm, Firefox, Thunar, anything X11 — all rendering pixel-perfect inside a single Kitty pane, over SSH, on Wayland, or wherever Kitty runs.
-
-If [`kitweb`](../kitweb) is *"Chromium inside a terminal,"* `kitwin` is *"the whole desktop inside a terminal."*
+[![demo]](https://github.com/user-attachments/assets/03f1abcc-2223-4160-959c-3df6e7109ba9)
 
 ## Installation
 
@@ -86,6 +84,9 @@ Right-clicking the root area opens **JWM's root menu** — your launcher.
 
 ## How it works
 
+`kitwin` boots the [JWM window manager](https://joewing.net/projects/jwm/) inside a hidden X server, captures the screen with FFmpeg, and streams it to a [Kitty-protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) terminal as native-resolution graphics.
+
+
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                  Kitty terminal (you)                    │
@@ -121,10 +122,3 @@ Four threads, all `mpsc`-glued:
 - Linux with Xvfb (Wayland host is fine — Xvfb is its own X server)
 - PulseAudio or PipeWire (for `--exec`-launched audio apps; `--no-audio` skips this)
 
-## Project status
-
-Early but useful. The capture/render/audio pipeline is the battle-tested core from its sibling [`kitweb`](../kitweb); the window-manager wrapper is fresh and small. Bugs welcome.
-
-## License
-
-Same as the parent repo.
